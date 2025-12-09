@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { GoogleGenAI, Type, Modality, GenerateContentResponse } from "@google/genai";
 import { AnalysisResult } from "../types";
 
 // Helper to encode ArrayBuffer to Base64
@@ -32,6 +32,31 @@ export class GeminiService {
     this.client = new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
+  // Retry wrapper for API calls to handle 429 errors
+  private async withRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 2000): Promise<T> {
+    let lastError: any;
+    
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        // Check for 429 (Resource Exhausted) or similar quota errors
+        const isRateLimit = error?.status === 429 || error?.code === 429 || error?.message?.includes('429') || error?.message?.includes('quota');
+        
+        if (isRateLimit && i < retries - 1) {
+          const delay = initialDelay * Math.pow(2, i); // Exponential backoff: 2s, 4s, 8s
+          console.warn(`Rate limit hit. Retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        throw error;
+      }
+    }
+    throw lastError;
+  }
+
   async analyzeImage(file: File, duration: number = 15): Promise<{ analysis: AnalysisResult; script: string }> {
     const arrayBuffer = await file.arrayBuffer();
     const base64Image = arrayBufferToBase64(arrayBuffer);
@@ -50,7 +75,8 @@ export class GeminiService {
       Return the response in JSON format.
     `;
 
-    const response = await this.client.models.generateContent({
+    // Wrap API call with retry
+    const response = await this.withRetry<GenerateContentResponse>(() => this.client.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: {
         parts: [
@@ -77,7 +103,7 @@ export class GeminiService {
           required: ["headline", "brandColors", "mood", "script"],
         },
       },
-    });
+    }));
 
     // Clean any potential markdown wrapping which can sometimes occur
     const jsonText = response.text ? response.text.replace(/```json|```/g, "").trim() : "{}";
@@ -119,16 +145,18 @@ export class GeminiService {
       - Return ONLY the raw script text. No JSON, no markdown, no labels like "Script:".
     `;
 
-    const response = await this.client.models.generateContent({
+    // Wrap API call with retry
+    const response = await this.withRetry<GenerateContentResponse>(() => this.client.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [{ text: prompt }]
-    });
+    }));
 
     return response.text ? response.text.trim() : "";
   }
 
   async generateSpeech(text: string, voiceName: string): Promise<ArrayBuffer> {
-    const response = await this.client.models.generateContent({
+    // Wrap API call with retry
+    const response = await this.withRetry<GenerateContentResponse>(() => this.client.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
       contents: [{ parts: [{ text: text }] }],
       config: {
@@ -139,7 +167,7 @@ export class GeminiService {
           },
         },
       },
-    });
+    }));
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) {

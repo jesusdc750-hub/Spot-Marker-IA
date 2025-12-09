@@ -6,6 +6,15 @@ import { VideoPreview } from './components/VideoPreview';
 import { VOICES, INITIAL_SCRIPT_PLACEHOLDER } from './constants';
 import { SpotState, VoiceOption } from './types';
 
+// Helper to determine friendly error messages
+const getErrorMessage = (error: any) => {
+    const isQuota = error?.status === 429 || error?.code === 429 || error?.message?.includes('429') || error?.message?.includes('quota');
+    if (isQuota) {
+        return "⚠️ Has excedido tu cuota de uso de la API (Error 429). El sistema intentó reintentar pero los servidores están saturados. Por favor espera unos momentos e intenta de nuevo.";
+    }
+    return "Ocurrió un error inesperado. Por favor intenta de nuevo.";
+};
+
 const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isExportingAudio, setIsExportingAudio] = useState(false);
@@ -71,7 +80,7 @@ const App: React.FC = () => {
       setState(prev => ({ 
         ...prev, 
         isAnalyzing: false, 
-        script: "Error al analizar la imagen. Por favor intenta de nuevo." 
+        script: getErrorMessage(error)
       }));
     }
   };
@@ -93,6 +102,7 @@ const App: React.FC = () => {
         } catch (error) {
             console.error("Rewrite failed", error);
             setState(prev => ({ ...prev, isRewriting: false }));
+            alert(getErrorMessage(error));
         }
     }
   };
@@ -170,6 +180,7 @@ const App: React.FC = () => {
     } catch (error) {
         console.error(error);
         setPreviewingVoiceId(null);
+        alert(getErrorMessage(error));
     }
   };
 
@@ -200,7 +211,7 @@ const App: React.FC = () => {
     } catch (error) {
       console.error("Spot generation failed", error);
       setState(prev => ({ ...prev, isGeneratingVoice: false }));
-      alert("Error generando el spot. Por favor intenta más tarde.");
+      alert(getErrorMessage(error));
     }
   };
 
