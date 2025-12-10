@@ -1,23 +1,61 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Wand2, Music, Mic, Settings2, Loader2, PlayCircle, Image as ImageIcon, Volume2, Download, FileAudio, Clock, Play, Square, ChevronDown, Check } from 'lucide-react';
+import { Upload, Wand2, Music, Mic, Settings2, Loader2, PlayCircle, Image as ImageIcon, Volume2, Download, FileAudio, Clock, Play, Square, ChevronDown, Check, RefreshCw, MessageSquare } from 'lucide-react';
 import { geminiService } from './services/geminiService';
 import { pcmToAudioBuffer, decodeAudioFile, mixAudioAndExport, playPreview } from './services/audioUtils';
 import { VideoPreview } from './components/VideoPreview';
-import { VOICES, INITIAL_SCRIPT_PLACEHOLDER } from './constants';
+import { VOICES, VOICE_STYLES, INITIAL_SCRIPT_PLACEHOLDER } from './constants';
 import { SpotState, VoiceOption } from './types';
 
 // Helper to determine friendly error messages
 const getErrorMessage = (error: any) => {
-    const isQuota = error?.status === 429 || error?.code === 429 || error?.message?.includes('429') || error?.message?.includes('quota');
-    if (isQuota) {
-        return "⚠️ Has excedido tu cuota de uso de la API (Error 429). El sistema intentó reintentar pero los servidores están saturados. Por favor espera unos momentos e intenta de nuevo.";
+    // Extract status code if available in nested objects
+    const status = error?.status || error?.code || error?.error?.code || error?.error?.status;
+    
+    // Safely extract message from various JSON structures
+    let message = "Unknown Error";
+    try {
+        if (typeof error?.message === 'string') {
+            message = error.message;
+        } else if (error?.error?.message) {
+            message = error.error.message;
+        } else if (typeof error === 'object') {
+            message = JSON.stringify(error);
+        } else {
+            message = String(error);
+        }
+    } catch(e) {
+        message = "Could not parse error details";
     }
-    return "Ocurrió un error inesperado. Por favor intenta de nuevo.";
+
+    const isQuota = status === 429 || message.includes('429') || message.includes('quota') || message.includes('RESOURCE_EXHAUSTED');
+    if (isQuota) {
+        return "⚠️ Has excedido tu cuota de uso de la API (Error 429). El sistema intentó reintentar varias veces pero los servidores siguen ocupados. Por favor espera 1 minuto e intenta de nuevo.";
+    }
+    
+    const isServer = (status >= 500 && status < 600) || message.includes('Internal') || message.includes('INTERNAL') || message.includes('500');
+    if (isServer) {
+        return "⚠️ Error interno temporal en Google Gemini (Error 500). El sistema reintentó pero el servicio está inestable. Por favor intenta cambiar el 'Estilo' a 'Natural' o espera unos segundos.";
+    }
+
+    // Return specific error message if available and safe, otherwise generic
+    if (message && !message.includes('fetch') && message.length < 500) {
+        // Clean up message if it is stringified JSON
+        if (message.startsWith('{')) {
+            try {
+                const parsed = JSON.parse(message);
+                if (parsed.error && parsed.error.message) return `Error: ${parsed.error.message}`;
+            } catch(e) {}
+        }
+        return `Error: ${message}`;
+    }
+    
+    return "Ocurrió un error inesperado al conectar con Gemini. Verifica tu conexión a internet o tu API Key.";
 };
 
 const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isExportingAudio, setIsExportingAudio] = useState(false);
+  const [isUpdatingAudio, setIsUpdatingAudio] = useState(false);
   
   // Voice Dropdown State
   const [isVoiceDropdownOpen, setIsVoiceDropdownOpen] = useState(false);
@@ -38,6 +76,7 @@ const App: React.FC = () => {
     musicBuffer: null,
     musicFileName: null,
     voiceProfile: VOICES[0].id,
+    voiceStyle: VOICE_STYLES[0].id,
     musicVolume: 0.25, // Default ~ Medium intensity
     duration: 15
   });
@@ -166,9 +205,13 @@ const App: React.FC = () => {
     setPreviewingVoiceId(voice.id);
 
     try {
+        // Find instruction for current style, or default
+        const style = VOICE_STYLES.find(s => s.id === state.voiceStyle)?.instruction || "Speak naturally.";
+        
         const pcmBuffer = await geminiService.generateSpeech(
             "Esta es mi voz para spot publicitario en español.", 
-            voice.geminiName
+            voice.geminiName,
+            style
         );
         
         const audioBuffer = pcmToAudioBuffer(pcmBuffer, 24000);
@@ -189,16 +232,50 @@ const App: React.FC = () => {
     setIsVoiceDropdownOpen(false);
   };
 
+  const handleUpdateAudio = async () => {
+    if (!state.script) return;
+    
+    setIsUpdatingAudio(true);
+    try {
+        const selectedVoice = VOICES.find(v => v.id === state.voiceProfile);
+        const selectedStyle = VOICE_STYLES.find(s => s.id === state.voiceStyle);
+        if (!selectedVoice) throw new Error("Voice not found");
+
+        const audioBufferData = await geminiService.generateSpeech(
+            state.script, 
+            selectedVoice.geminiName,
+            selectedStyle?.instruction
+        );
+        
+        const decodedVoiceBuffer = pcmToAudioBuffer(audioBufferData, 24000);
+        
+        setState(prev => ({
+            ...prev,
+            audioBuffer: decodedVoiceBuffer
+        }));
+    } catch (error) {
+        console.error("Failed to update audio", error);
+        alert(getErrorMessage(error));
+    } finally {
+        setIsUpdatingAudio(false);
+    }
+  };
+
   const generateSpot = async () => {
     if (!state.script) return;
 
     setState(prev => ({ ...prev, isGeneratingVoice: true }));
     try {
       const selectedVoice = VOICES.find(v => v.id === state.voiceProfile);
+      const selectedStyle = VOICE_STYLES.find(s => s.id === state.voiceStyle);
       if (!selectedVoice) throw new Error("Voice not found");
 
       // 1. Generate Voice (Gemini API)
-      const audioBufferData = await geminiService.generateSpeech(state.script, selectedVoice.geminiName);
+      const audioBufferData = await geminiService.generateSpeech(
+          state.script, 
+          selectedVoice.geminiName,
+          selectedStyle?.instruction
+      );
       const decodedVoiceBuffer = pcmToAudioBuffer(audioBufferData, 24000);
 
       // 2. Music is already loaded in state.musicBuffer (if uploaded)
@@ -250,7 +327,7 @@ const App: React.FC = () => {
           <div className="flex items-center gap-4 text-sm text-slate-400">
             <span className="hidden md:inline">Generador de Spots Publicitarios</span>
             <div className="h-4 w-px bg-slate-700"></div>
-            <span className="text-indigo-400 font-medium">v1.2.0</span>
+            <span className="text-indigo-400 font-medium">v1.3.3</span>
           </div>
         </div>
       </header>
@@ -337,9 +414,11 @@ const App: React.FC = () => {
                     </div>
                 </div>
 
-                {/* Script Editor */}
+                {/* Script Editor with Update Button */}
                 <div className="relative">
-                  <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Guion Generado (Editable)</label>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider">Guion Generado (Editable)</label>
+                  </div>
                   <textarea
                     value={state.script}
                     onChange={(e) => setState(prev => ({ ...prev, script: e.target.value, audioBuffer: null, musicBuffer: null }))}
@@ -347,6 +426,22 @@ const App: React.FC = () => {
                     placeholder={INITIAL_SCRIPT_PLACEHOLDER}
                     className={`w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none resize-none leading-relaxed transition-opacity ${state.isRewriting ? 'opacity-50' : 'opacity-100'}`}
                   />
+                  {/* Correct Pronunciation / Update Audio Button */}
+                  {state.script && !state.isAnalyzing && !state.isRewriting && (
+                    <button
+                        onClick={handleUpdateAudio}
+                        disabled={isUpdatingAudio}
+                        className="mt-2 text-xs flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors w-full justify-center border border-slate-600"
+                    >
+                        {isUpdatingAudio ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                            <RefreshCw className="w-3 h-3" />
+                        )}
+                        Actualizar Audio con Correcciones / Cambios
+                    </button>
+                  )}
+                  
                   {state.isRewriting && (
                       <div className="absolute inset-0 flex items-center justify-center bg-black/10 rounded-lg backdrop-blur-[1px]">
                           <div className="bg-slate-900/90 text-indigo-400 px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 border border-slate-700 shadow-xl">
@@ -357,6 +452,7 @@ const App: React.FC = () => {
                   )}
                 </div>
 
+                {/* Voice & Style Controls */}
                 <div className="grid grid-cols-2 gap-4">
                   {/* Voice Selector Custom Dropdown */}
                   <div className="relative">
@@ -396,8 +492,26 @@ const App: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Music Upload (Replacing Selector) */}
+                  {/* Style Selector */}
                   <div className="relative">
+                     <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider flex items-center gap-1">
+                        <MessageSquare className="w-3 h-3" /> Estilo / Tono
+                     </label>
+                     <select
+                        value={state.voiceStyle}
+                        onChange={(e) => setState(prev => ({ ...prev, voiceStyle: e.target.value, audioBuffer: null }))}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500 outline-none hover:bg-slate-800 cursor-pointer"
+                     >
+                        {VOICE_STYLES.map(style => (
+                            <option key={style.id} value={style.id}>{style.name}</option>
+                        ))}
+                     </select>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Music Upload (Replacing Selector) */}
+                  <div className="relative col-span-2">
                     <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider flex items-center gap-1">
                       <Music className="w-3 h-3" /> Música de Fondo
                     </label>
@@ -512,8 +626,8 @@ const App: React.FC = () => {
                     </div>
                     <div>
                         <span className="block text-slate-500 uppercase tracking-wider text-[10px]">Estilo</span>
-                        <span className="text-white capitalize">
-                            {state.musicBuffer ? 'Personalizado' : (state.analysisData?.mood || 'Neutro')}
+                        <span className="text-white capitalize truncate max-w-[100px]">
+                            {VOICE_STYLES.find(s => s.id === state.voiceStyle)?.name || 'Natural'}
                         </span>
                     </div>
                  </div>

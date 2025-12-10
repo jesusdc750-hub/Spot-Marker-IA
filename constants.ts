@@ -1,4 +1,4 @@
-import { VoiceOption } from './types';
+import { VoiceOption, VoiceStyle } from './types';
 
 export const VOICES: VoiceOption[] = [
   // Original Voices
@@ -21,6 +21,15 @@ export const VOICES: VoiceOption[] = [
   { id: 'mx-female-5', name: 'Gabriela (Fiesta Total)', gender: 'female', geminiName: 'Kore' },
   { id: 'mx-female-6', name: 'Fernanda (Influencer)', gender: 'female', geminiName: 'Aoede' },
   { id: 'mx-female-7', name: 'Camila (Voz Activa)', gender: 'female', geminiName: 'Kore' },
+];
+
+export const VOICE_STYLES: VoiceStyle[] = [
+  { id: 'natural', name: 'Natural / Estándar', instruction: 'Speak naturally and clearly.' },
+  { id: 'enthusiastic', name: 'Muy Entusiasta / Venta', instruction: 'Speak with high energy, excitement and enthusiasm, like a radio commercial.' },
+  { id: 'news', name: 'Noticiero / Serio', instruction: 'Speak with a professional, serious, news-anchor tone.' },
+  { id: 'calm', name: 'Cálido / Suave', instruction: 'Speak in a calm, warm, and soothing manner.' },
+  { id: 'urgent', name: 'Urgente / Rápido', instruction: 'Speak quickly and with a sense of urgency.' },
+  { id: 'dramatic', name: 'Dramático / Cine', instruction: 'Speak with a deep, dramatic, cinematic movie trailer tone.' },
 ];
 
 export const INTENSITIES = [

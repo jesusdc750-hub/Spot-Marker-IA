@@ -24,16 +24,8 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
 }
 
 export class GeminiService {
-  private client: GoogleGenAI;
-
-  constructor() {
-    // Note: In a real production app, ensure this is handled securely.
-    // For this environment, we rely on the injected process.env.API_KEY
-    this.client = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  }
-
-  // Retry wrapper for API calls to handle 429 errors
-  private async withRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 2000): Promise<T> {
+  // Retry wrapper for API calls to handle 429 (Rate Limit) and 5xx (Server) errors
+  private async withRetry<T>(operation: () => Promise<T>, retries = 6, initialDelay = 5000): Promise<T> {
     let lastError: any;
     
     for (let i = 0; i < retries; i++) {
@@ -41,12 +33,31 @@ export class GeminiService {
         return await operation();
       } catch (error: any) {
         lastError = error;
-        // Check for 429 (Resource Exhausted) or similar quota errors
-        const isRateLimit = error?.status === 429 || error?.code === 429 || error?.message?.includes('429') || error?.message?.includes('quota');
         
-        if (isRateLimit && i < retries - 1) {
-          const delay = initialDelay * Math.pow(2, i); // Exponential backoff: 2s, 4s, 8s
-          console.warn(`Rate limit hit. Retrying in ${delay}ms...`);
+        // Extract status from various potential locations in the error object structure
+        // Checks: top level, inside 'error', inside 'response', etc.
+        const status = 
+            error?.status || 
+            error?.code || 
+            error?.error?.code || 
+            error?.error?.status ||
+            error?.response?.status;
+        
+        // Safely extract message for detection
+        let message = "Unknown error";
+        try {
+            message = error?.message || error?.error?.message || (typeof error === 'object' ? JSON.stringify(error) : String(error));
+        } catch (e) {
+            message = "Non-serializable error object";
+        }
+        
+        const isRateLimit = status === 429 || message.includes('429') || message.includes('quota') || message.includes('RESOURCE_EXHAUSTED');
+        const isServerError = (status >= 500 && status < 600) || message.includes('Internal error') || message.includes('INTERNAL');
+        
+        if ((isRateLimit || isServerError) && i < retries - 1) {
+          // Exponential backoff with longer delays: 5s, 10s, 20s, 40s, 80s...
+          const delay = initialDelay * Math.pow(2, i); 
+          console.warn(`API Error (${status || 'Unknown'}). Retrying in ${delay/1000}s... (Attempt ${i + 1}/${retries})`, message);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
@@ -58,6 +69,12 @@ export class GeminiService {
   }
 
   async analyzeImage(file: File, duration: number = 15): Promise<{ analysis: AnalysisResult; script: string }> {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) throw new Error("API Key missing. Please restart the app or select a key.");
+    
+    // Create client instance per request
+    const client = new GoogleGenAI({ apiKey });
+
     const arrayBuffer = await file.arrayBuffer();
     const base64Image = arrayBufferToBase64(arrayBuffer);
 
@@ -76,7 +93,7 @@ export class GeminiService {
     `;
 
     // Wrap API call with retry
-    const response = await this.withRetry<GenerateContentResponse>(() => this.client.models.generateContent({
+    const response = await this.withRetry<GenerateContentResponse>(() => client.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: {
         parts: [
@@ -133,6 +150,12 @@ export class GeminiService {
   }
 
   async rewriteScript(analysis: AnalysisResult, duration: number): Promise<string> {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) throw new Error("API Key missing");
+    
+    // Create client instance per request
+    const client = new GoogleGenAI({ apiKey });
+
     const prompt = `
       Act as an expert copywriter for the Mexican market.
       Based on the following analysis of a product/image:
@@ -146,7 +169,7 @@ export class GeminiService {
     `;
 
     // Wrap API call with retry
-    const response = await this.withRetry<GenerateContentResponse>(() => this.client.models.generateContent({
+    const response = await this.withRetry<GenerateContentResponse>(() => client.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [{ text: prompt }]
     }));
@@ -154,26 +177,66 @@ export class GeminiService {
     return response.text ? response.text.trim() : "";
   }
 
-  async generateSpeech(text: string, voiceName: string): Promise<ArrayBuffer> {
-    // Wrap API call with retry
-    const response = await this.withRetry<GenerateContentResponse>(() => this.client.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: text }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voiceName },
-          },
-        },
-      },
-    }));
+  async generateSpeech(text: string, voiceName: string, styleInstruction: string = "Speak naturally."): Promise<ArrayBuffer> {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) throw new Error("API Key missing");
+    
+    const client = new GoogleGenAI({ apiKey });
 
+    const makeRequest = (instruction?: string) => {
+        // Build config conditionally
+        const config: any = {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+                voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: voiceName },
+                },
+            },
+        };
+
+        // Only add systemInstruction if it's meaningful. 
+        // Sending complex system instructions to the preview TTS model can cause 500 errors.
+        if (instruction && instruction !== "Speak naturally." && instruction.trim() !== "") {
+            config.systemInstruction = instruction;
+        }
+
+        return client.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: text }] }],
+            config: config,
+        });
+    };
+
+    try {
+      // 1. Attempt with the requested style
+      const response = await this.withRetry<GenerateContentResponse>(() => makeRequest(styleInstruction));
+      return this.processAudioResponse(response);
+    } catch (error: any) {
+      const status = error?.status || error?.code || error?.error?.code;
+      const message = error?.message || "";
+
+      // 2. Fallback: If style generation failed (500 error), try with a neutral instruction.
+      const isServerError = (status >= 500 && status < 600) || message.includes('Internal') || message.includes('INTERNAL');
+
+      if (isServerError && styleInstruction !== "Speak naturally.") {
+        console.warn("Speech generation with style failed. Retrying with neutral style...");
+        try {
+          // Retry without any specific instruction
+          const fallbackResponse = await this.withRetry<GenerateContentResponse>(() => makeRequest("Speak naturally."), 2, 2000);
+          return this.processAudioResponse(fallbackResponse);
+        } catch (fallbackError) {
+          throw error; // If fallback fails, throw original error
+        }
+      }
+      throw error;
+    }
+  }
+
+  private processAudioResponse(response: GenerateContentResponse): ArrayBuffer {
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) {
-      throw new Error("Failed to generate speech audio");
+      throw new Error("Failed to generate speech audio. Empty response from API.");
     }
-
     // This returns raw PCM 16-bit 24kHz data (Int16)
     return base64ToArrayBuffer(base64Audio);
   }

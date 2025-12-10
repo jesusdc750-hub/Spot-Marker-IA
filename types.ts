@@ -11,6 +11,7 @@ export interface SpotState {
   musicBuffer: AudioBuffer | null;
   musicFileName: string | null;
   voiceProfile: string;
+  voiceStyle: string;
   musicVolume: number;
   duration: number; // in seconds
 }
@@ -27,4 +28,10 @@ export interface VoiceOption {
   name: string;
   gender: 'male' | 'female';
   geminiName: string;
+}
+
+export interface VoiceStyle {
+  id: string;
+  name: string;
+  instruction: string;
 }
